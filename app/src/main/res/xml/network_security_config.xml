@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 회사 PC 의 Suite(http://100.x.x.x:8765)는 https 가 아니다. Tailscale 이 이미
+     암호화된 통로라 http 로 붙는다. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
