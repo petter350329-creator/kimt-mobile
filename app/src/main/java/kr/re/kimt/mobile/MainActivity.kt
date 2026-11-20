@@ -10,7 +10,9 @@ package kr.re.kimt.mobile
 //      2) 로그인 토큰을 앱 저장소에 보관 (window.KIMTApp 다리)
 //      3) 전화(tel:)·지도 앱(intent:, nmap:, geo:) 링크를 진짜 앱으로 넘기기
 //      4) 연결이 안 되면 [다시 시도] / [QR 다시 등록] 화면
-//  · 3단계(서류 스캔 → NAS 업로드)도 이 앱에 붙일 예정이다.
+//  · 3단계(2026-11-20): KIMTApp.scan(json) → 문서 스캐너(테두리 자동) →
+//    PC 에 이름을 물어(/api/m/upload/plan) 한 장씩 올린다(/api/m/upload).
+//    진행은 window.kimtScanEvent({type:...}) 로 화면에 알린다.
 // ================================================================
 
 import android.app.Activity
@@ -43,6 +45,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
@@ -56,6 +66,8 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var root: FrameLayout
     private var web: WebView? = null
+    private var pendingScan: JSONObject? = null
+    private val reqScan = 7001
 
     private var server: String
         get() = prefs.getString("server", "") ?: ""
@@ -277,6 +289,139 @@ class MainActivity : Activity() {
         return true
     }
 
+    // ── 3단계: 서류 스캔 → 올리기 ────────────────────────────────
+    private fun scanEvent(ev: JSONObject) {
+        runOnUiThread {
+            web?.evaluateJavascript("window.kimtScanEvent && window.kimtScanEvent($ev)", null)
+        }
+    }
+
+    private fun startScan(json: String) {
+        val job = try {
+            JSONObject(json)
+        } catch (e: Exception) {
+            scanEvent(JSONObject().put("type", "error").put("message", "잘못된 스캔 요청"))
+            return
+        }
+        pendingScan = job
+        val opts = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(true)
+            .setPageLimit(20)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        GmsDocumentScanning.getClient(opts).getStartScanIntent(this)
+            .addOnSuccessListener { sender ->
+                try {
+                    @Suppress("DEPRECATION")
+                    startIntentSenderForResult(sender, reqScan, null, 0, 0, 0)
+                } catch (e: Exception) {
+                    pendingScan = null
+                    scanEvent(JSONObject().put("type", "error").put("message", "스캐너를 열지 못했어요: ${e.message}"))
+                }
+            }
+            .addOnFailureListener { e ->
+                pendingScan = null
+                scanEvent(JSONObject().put("type", "error").put("message", "스캐너를 열지 못했어요: ${e.message}"))
+            }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != reqScan) return
+        val job = pendingScan ?: return
+        pendingScan = null
+        val result = if (resultCode == RESULT_OK) GmsDocumentScanningResult.fromActivityResultIntent(data) else null
+        val pages = result?.pages?.map { it.imageUri } ?: emptyList()
+        if (pages.isEmpty()) {
+            scanEvent(JSONObject().put("type", "cancel"))
+            return
+        }
+        Thread { uploadPages(job, pages) }.start()
+    }
+
+    private fun uploadPages(job: JSONObject, pages: List<Uri>) {
+        val saved = JSONArray()
+        val errors = JSONArray()
+        try {
+            val acc = job.optString("acc")
+            val pick = job.optInt("pick", 0)
+            scanEvent(JSONObject().put("type", "plan").put("count", pages.size))
+            val planReq = JSONObject()
+                .put("acc", acc).put("pick", pick).put("kind", job.optString("kind"))
+                .put("count", pages.size).put("modality", job.optString("modality"))
+                .put("opt", job.optString("opt")).put("custom", job.optString("custom"))
+            val plan = postJson("$server/api/m/upload/plan", planReq)
+            if (!plan.optBoolean("ok")) {
+                scanEvent(JSONObject().put("type", "error").put("message", plan.optString("message", "이름을 정하지 못했어요")))
+                return
+            }
+            val names = plan.getJSONArray("names")
+            for (i in pages.indices) {
+                val name = names.optString(i, "")
+                scanEvent(JSONObject().put("type", "progress").put("i", i + 1).put("n", pages.size).put("name", name))
+                val bytes = contentResolver.openInputStream(pages[i])?.use { it.readBytes() }
+                if (bytes == null) {
+                    errors.put("$name: 사진을 읽지 못했어요")
+                    continue
+                }
+                val url = "$server/api/m/upload?acc=" + URLEncoder.encode(acc, "UTF-8") +
+                    "&pick=$pick&name=" + URLEncoder.encode(name, "UTF-8")
+                val res = postBytes(url, bytes)
+                if (res.optBoolean("ok")) saved.put(res.optString("saved", name))
+                else errors.put(name + ": " + res.optString("message", "실패"))
+            }
+            scanEvent(JSONObject().put("type", "done").put("saved", saved).put("errors", errors))
+        } catch (e: Exception) {
+            scanEvent(JSONObject().put("type", "error").put("saved", saved)
+                .put("message", "올리다 끊겼어요: ${e.message}"))
+        }
+    }
+
+    private fun openPost(url: String, contentType: String): HttpURLConnection {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"
+        c.connectTimeout = 15000
+        c.readTimeout = 90000
+        c.doOutput = true
+        c.setRequestProperty("Content-Type", contentType)
+        c.setRequestProperty("X-KIMT-Token", prefs.getString("token", "") ?: "")
+        return c
+    }
+
+    private fun readJson(c: HttpURLConnection): JSONObject {
+        val stream = if (c.responseCode in 200..299) c.inputStream else (c.errorStream ?: c.inputStream)
+        val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        return try {
+            JSONObject(text)
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("message", "HTTP ${c.responseCode}")
+        }
+    }
+
+    private fun postJson(url: String, body: JSONObject): JSONObject {
+        val c = openPost(url, "application/json; charset=utf-8")
+        try {
+            c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            return readJson(c)
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private fun postBytes(url: String, bytes: ByteArray): JSONObject {
+        val c = openPost(url, "image/jpeg")
+        try {
+            c.setFixedLengthStreamingMode(bytes.size)
+            c.outputStream.use { it.write(bytes) }
+            return readJson(c)
+        } finally {
+            c.disconnect()
+        }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         val w = web
@@ -299,6 +444,11 @@ class MainActivity : Activity() {
                 prefs.edit().remove("server").remove("token").apply()
                 showStart(null)
             }
+        }
+
+        @JavascriptInterface
+        fun scan(json: String) {
+            runOnUiThread { startScan(json) }
         }
 
         @JavascriptInterface

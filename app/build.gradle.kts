@@ -41,4 +41,6 @@ android {
 dependencies {
     // QR 찍기 — 구글 플레이 서비스의 스캐너 화면을 빌려 쓴다 (카메라 권한 필요 없음)
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // 서류 스캔 — 테두리 자동 인식·보정 (구글 플레이 서비스 문서 스캐너, 카메라 권한 필요 없음)
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1")
 }
