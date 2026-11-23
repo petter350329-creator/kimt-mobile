@@ -67,6 +67,7 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private var web: WebView? = null
     private var pendingScan: JSONObject? = null
+    private lateinit var updater: Updater
     private val reqScan = 7001
 
     private var server: String
@@ -90,6 +91,15 @@ class MainActivity : Activity() {
         }
 
         if (server.isEmpty()) showStart(null) else showWeb("$server/m/")
+
+        // 앱 껍데기 새 버전 확인 (6시간에 한 번, 조용히) — 2026-11-23
+        updater = Updater(this)
+        if (intent?.action == Updater.ACTION_STATUS) updater.onStatus(intent) else updater.checkQuietly()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Updater.ACTION_STATUS) updater.onStatus(intent)
     }
 
     private fun dp(v: Int): Int =
@@ -448,6 +458,14 @@ class MainActivity : Activity() {
                 prefs.edit().remove("server").remove("token").apply()
                 showStart(null)
             }
+        }
+
+        @JavascriptInterface
+        fun appBuild(): String = updater.currentBuild().toString()
+
+        @JavascriptInterface
+        fun checkUpdate() {
+            runOnUiThread { updater.check(manual = true) }
         }
 
         @JavascriptInterface
