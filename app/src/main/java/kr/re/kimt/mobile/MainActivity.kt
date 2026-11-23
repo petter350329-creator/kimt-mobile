@@ -146,7 +146,7 @@ class MainActivity : Activity() {
             col.addView(TextView(this).apply {
                 text = "회사 PC 에 연결이 안 돼요\n\n" +
                     "· 회사 PC 가 켜져 있고 Suite 가 실행 중인지\n" +
-                    "· 폰의 Tailscale 이 켜져 있는지 확인해 주세요\n\n" +
+                    "· (사내 주소를 쓰는 경우) 폰의 Tailscale 이 켜져 있는지 확인해 주세요\n\n" +
                     "주소: $server\n($error)"
                 textSize = 15f
                 setTextColor(sub)
@@ -189,14 +189,14 @@ class MainActivity : Activity() {
 
     private fun askAddress() {
         val input = EditText(this).apply {
-            hint = "예) 100.101.102.103"
+            hint = "예) https://kimt-pc.○○.ts.net"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(Uri.parse(server).host ?: "")
         }
         val box = FrameLayout(this).apply { setPadding(dp(22), dp(8), dp(22), 0); addView(input) }
         AlertDialog.Builder(this)
             .setTitle("회사 PC 주소")
-            .setMessage("Suite 설정 → 폰 접속에 보이는 주소(100. 으로 시작)를 넣어요. 등록 코드 6자리는 다음 화면에서 넣어요.")
+            .setMessage("Suite 설정 → 폰 접속의 외부 주소(https://…ts.net)를 넣어요. 등록 코드 6자리는 다음 화면에서 넣어요.")
             .setView(box)
             .setPositiveButton("연결") { _, _ ->
                 var a = input.text.toString().trim().trimEnd('/')
@@ -204,8 +204,12 @@ class MainActivity : Activity() {
                 if (!a.startsWith("http://") && !a.startsWith("https://")) a = "http://$a"
                 val u = Uri.parse(a)
                 if (u.host.isNullOrEmpty()) return@setPositiveButton
-                val port = if (u.port > 0) u.port else 8765
-                server = "${u.scheme}://${u.host}:$port"
+                // https(외부 주소·Funnel)는 포트 없이, http(사내망·Tailscale IP)는 8765
+                server = when {
+                    u.port > 0 -> "${u.scheme}://${u.host}:${u.port}"
+                    u.scheme == "https" -> "https://${u.host}"
+                    else -> "${u.scheme}://${u.host}:8765"
+                }
                 showWeb("$server/m/")
             }
             .setNegativeButton("취소", null)
